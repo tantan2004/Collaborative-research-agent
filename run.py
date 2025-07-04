@@ -502,6 +502,19 @@ def route_decision(state: GraphState) -> str:
         return "human_feedback"
     else:
         return END
+def run_node(step: str, state: GraphState) -> GraphState:
+    node_map = {
+        "researcher": researcher_node,
+        "summarizer": summarizer_node,
+        "critic": critic_node,
+        "human_feedback": human_feedback_node
+    }
+
+    if step in node_map:
+        return node_map[step]().invoke(state)
+    else:
+        raise ValueError(f"Unknown step: {step}")
+
 
 def build_graph():
     try:
