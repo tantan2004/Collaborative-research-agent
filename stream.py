@@ -3,12 +3,12 @@ from datetime import datetime
 from typing import Dict, Any
 
 try:
-    from run import build_graph, GraphState, run_node
+    from run import build_graph, GraphState
 except ImportError:
     st.error("Could not import required functions from run.py.")
     st.stop()
 
-st.set_page_config(page_title="Research Agent", layout="wide")
+st.set_page_config(page_title="Research Agent", page_icon="🔍", layout="wide")
 
 st.markdown("""
 <style>
@@ -53,61 +53,35 @@ if 'current_step' not in st.session_state:
 if 'research_history' not in st.session_state:
     st.session_state.research_history = []
 
-# Helper display
-def display_status(status: str, message: str):
-    color_class = {
-        "running": "status-running",
-        "complete": "status-complete",
-        "error": "status-error"
-    }.get(status, "status-box")
-    st.markdown(f'<div class="status-box {color_class}">{message}</div>', unsafe_allow_html=True)
-
-def run_full_research_cycle(state: Dict[str, Any]) -> Dict[str, Any]:
+def run_research_step(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Run one step of research using the graph"""
     try:
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-
-        current_state = state.copy()
-        max_loops = 10
-
-        for step in range(max_loops):
-            if current_state.get("decision") == "end":
-                break
-
-            progress_bar.progress((step + 1) / max_loops)
-
-            decision = current_state.get("decision", "")
-            status_text.text(f"Running: {decision or 'researcher'}")
-
-            # Only run what the critic or human recommended
-            if decision == "reresearch" or step == 0:
-                current_state = run_node("researcher", current_state)
-                if current_state.get("decision") == "end":
-                    break
-
-            if decision == "resummarize" or step == 0 or current_state.get("decision") == "resummarize":
-                current_state = run_node("summarizer", current_state)
-                if current_state.get("decision") == "end":
-                    break
-
-            current_state = run_node("critic", current_state)
-            if current_state.get("decision") == "human_feedback":
-                return current_state
-
-        progress_bar.progress(1.0)
-        status_text.text("Research completed.")
-        return current_state
-
+        # Create a temporary graph with human feedback disabled for auto steps
+        temp_state = state.copy()
+        
+        # Run the graph for one iteration, but capture human feedback requests
+        result = st.session_state.graph.invoke(temp_state, config={"recursion_limit": 5})
+        
+        return result
     except Exception as e:
-        st.error(f"Error during research: {e}")
-        return state
-
+        st.error(f"Error during research step: {e}")
+        return {**state, "decision": "end"}
 
 def handle_human_decision(state: Dict[str, Any], decision: str, manual_input: str = "") -> Dict[str, Any]:
+    """Handle human decision and return updated state"""
     if decision == "manual" and manual_input.strip():
-        return {**state, "summary": manual_input.strip(), "decision": "end"}
+        return {
+            **state, 
+            "summary": manual_input.strip(), 
+            "decision": "end",
+            "loop_count": state.get("loop_count", 0) + 1
+        }
     if decision in ["end", "reresearch", "resummarize"]:
-        return {**state, "decision": decision}
+        return {
+            **state, 
+            "decision": decision,
+            "loop_count": state.get("loop_count", 0) + 1
+        }
     return {**state, "decision": "end"}
 
 # ────────────── Sidebar ──────────────
@@ -157,46 +131,125 @@ if state is None:
     """)
 else:
     st.subheader(f"Query: {state['query']}")
+    
+    # Show current stats
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Loop Count", state.get("loop_count", 0))
+    with col2:
+        st.metric("Research Count", state.get("research_count", 0))
+    with col3:
+        st.metric("Summarize Count", state.get("summarize_count", 0))
+    with col4:
+        st.metric("Current Decision", state.get("decision", "None"))
 
-    # Auto loop
+    # Auto research step
     if st.session_state.current_step == "auto_research":
         st.markdown("### Running Research Agent...")
-        updated = run_full_research_cycle(state)
+        
+        # Show what action will be taken
+        decision = state.get("decision", "")
+        if decision == "reresearch":
+            st.info(" Conducting additional research...")
+        elif decision == "resummarize":
+            st.info(" Improving the summary...")
+        else:
+            st.info(" Starting initial research...")
+            
+        # Show progress
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        status_text.text("Running research cycle...")
+        progress_bar.progress(0.5)
+        
+        # Run one complete cycle
+        updated = run_research_step(state)
+        
+        progress_bar.progress(1.0)
+        status_text.text("Research cycle completed.")
+        
         st.session_state.research_state = updated
 
+        # Check what to do next
         if updated.get("decision") == "human_feedback":
             st.session_state.current_step = "human_feedback"
-        else:
+            st.info(" Human input required - redirecting...")
+        elif updated.get("decision") == "end":
             st.session_state.current_step = None
             st.session_state.research_history.append({
                 "query": updated["query"],
                 "summary": updated["summary"],
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")
             })
+            st.success(" Research completed automatically!")
+        else:
+            # Continue with more cycles if needed
+            st.session_state.current_step = "auto_research"
+            
         st.rerun()
 
     # Human decision required
     elif st.session_state.current_step == "human_feedback":
-        st.subheader("Your Input Needed")
+        st.subheader(" Your Input Needed")
+        
+        # Show current summary
         st.markdown("### Current Summary")
         st.markdown(state["summary"])
 
+        # Show AI recommendation
         if state.get("_critic_recommendation"):
-            st.info(f"AI Recommendation: **{state['_critic_recommendation']}**")
+            recommendation = state["_critic_recommendation"]
+            if recommendation == "reresearch":
+                st.info(" AI Recommendation: **More Research Needed** - The content may be insufficient or needs different information.")
+            elif recommendation == "resummarize":
+                st.info(" AI Recommendation: **Improve Summary** - The information is good but summary needs better structure or detail.")
+            else:
+                st.info(f" AI Recommendation: **{recommendation}**")
 
+        # Show execution stats
+        st.markdown("### Current Stats")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write(f"**Research attempts:** {state.get('research_count', 0)}/4")
+            st.write(f"**Total loops:** {state.get('loop_count', 0)}")
+        with col2:
+            st.write(f"**Summarize attempts:** {state.get('summarize_count', 0)}/4")
+            st.write(f"**Last decision:** {state.get('decision', 'None')}")
+
+        # Show action buttons
+        st.markdown("### Choose Your Action:")
+        
         updated = None
         col1, col2, col3 = st.columns(3)
+        
         with col1:
-            if st.button("Accept Summary"):
+            if st.button(" Accept Summary", type="primary"):
                 updated = handle_human_decision(state, "end")
+                
         with col2:
-            if st.button(" More Research"):
-                updated = handle_human_decision(state, "reresearch")
+            research_disabled = state.get("research_count", 0) >= 4
+            if st.button(" More Research", disabled=research_disabled):
+                if not research_disabled:
+                    updated = handle_human_decision(state, "reresearch")
+                else:
+                    st.error("Maximum research attempts reached!")
+            if research_disabled:
+                st.caption(" Max research attempts reached")
+                
         with col3:
-            if st.button(" Resummarize"):
-                updated = handle_human_decision(state, "resummarize")
+            summarize_disabled = state.get("summarize_count", 0) >= 4
+            if st.button("Improve Summary", disabled=summarize_disabled):
+                if not summarize_disabled:
+                    updated = handle_human_decision(state, "resummarize")
+                else:
+                    st.error("Maximum summarize attempts reached!")
+            if summarize_disabled:
+                st.caption(" Max summarize attempts reached")
 
-        manual_input = st.text_area(" Or write your own summary:", height=200)
+        st.markdown("### Or Write Your Own Summary:")
+        manual_input = st.text_area("Enter your custom summary:", height=200, placeholder="Write your own summary here...")
+        
         if st.button("Submit Manual Summary"):
             if manual_input.strip():
                 updated = handle_human_decision(state, "manual", manual_input)
@@ -206,8 +259,13 @@ else:
         if updated:
             st.session_state.research_state = updated
             decision = updated.get("decision")
+            
             if decision in ["reresearch", "resummarize"]:
                 st.session_state.current_step = "auto_research"
+                if decision == "reresearch":
+                    st.success("Will conduct additional research...")
+                else:
+                    st.success(" Will improve the summary...")
             else:
                 st.session_state.current_step = None
                 st.session_state.research_history.append({
@@ -215,23 +273,51 @@ else:
                     "summary": updated["summary"],
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")
                 })
+                st.success(" Research completed!")
             st.rerun()
 
-    # Final state
     else:
-        st.success(" Research Completed")
+        st.success(" Research Completed!")
+        
         st.markdown("### Final Summary")
         st.markdown(state["summary"])
 
-        with st.expander("View Raw Research Content"):
-            st.text(state["raw_content"][:2000])
+        with st.expander(" View Raw Research Content"):
+            raw_content = state.get("raw_content", "No raw content available")
+            st.text(raw_content[:2000] + "..." if len(raw_content) > 2000 else raw_content)
 
+        with st.expander(" View Execution Statistics"):
+            st.write(f"**Total loops:** {state.get('loop_count', 0)}")
+            st.write(f"**Research attempts:** {state.get('research_count', 0)}")
+            st.write(f"**Summarize attempts:** {state.get('summarize_count', 0)}")
+            st.write(f"**Final decision:** {state.get('decision', 'N/A')}")
+
+        # Action buttons
+        st.markdown("### Want to Continue?")
         col1, col2 = st.columns(2)
+        
         with col1:
-            if st.button("Continue Research"):
-                st.session_state.current_step = "auto_research"
-                st.rerun()
+            research_disabled = state.get("research_count", 0) >= 4
+            if st.button(" Continue Research", type="secondary", disabled=research_disabled):
+                if not research_disabled:
+                    st.session_state.research_state = {
+                        **state,
+                        "decision": "reresearch"
+                    }
+                    st.session_state.current_step = "auto_research"
+                    st.rerun()
+            if research_disabled:
+                st.caption("Max research attempts reached")
+                
         with col2:
-            if st.button("Improve Summary"):
-                st.session_state.current_step = "auto_research"
-                st.rerun()
+            summarize_disabled = state.get("summarize_count", 0) >= 4
+            if st.button("Improve Summary", type="secondary", disabled=summarize_disabled):
+                if not summarize_disabled:
+                    st.session_state.research_state = {
+                        **state,
+                        "decision": "resummarize"
+                    }
+                    st.session_state.current_step = "auto_research"
+                    st.rerun()
+            if summarize_disabled:
+                st.caption("Max summarize attempts reached")
