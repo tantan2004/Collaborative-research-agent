@@ -8,7 +8,7 @@ except ImportError:
     st.error("Could not import required functions from run.py.")
     st.stop()
 
-st.set_page_config(page_title="Research Agent", page_icon="🔍", layout="wide")
+st.set_page_config(page_title="Research Agent", layout="wide")
 
 st.markdown("""
 <style>
