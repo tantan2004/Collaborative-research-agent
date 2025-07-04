@@ -175,7 +175,7 @@ else:
 
         if state.get("_critic_recommendation"):
             st.info(f"AI recommends: **{state['_critic_recommendation']}**")
-
+        update=None
         col1, col2, col3 = st.columns(3)
         with col1:
             if st.button(" Accept Summary"):
@@ -186,6 +186,7 @@ else:
         with col3:
             if st.button(" Resummarize"):
                 updated = handle_human_decision(state, "resummarize")
+                
 
         manual_input = st.text_area("Or write your own summary:", height=200)
         if st.button("Submit Manual Summary"):
