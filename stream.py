@@ -2,18 +2,15 @@ import streamlit as st
 from datetime import datetime
 from typing import Dict, Any
 
+# Import backend logic
 try:
     from run import build_graph, GraphState, run_node
 except ImportError:
     st.error("Could not import required functions from run.py.")
     st.stop()
 
-st.set_page_config(
-    page_title="Research Agent",
-    page_icon="🔍",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# Page config and CSS
+st.set_page_config(page_title="Research Agent", page_icon="🔍", layout="wide")
 
 st.markdown("""
 <style>
@@ -44,7 +41,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Session state
+# Initialize session state
 if 'graph' not in st.session_state:
     try:
         st.session_state.graph = build_graph()
@@ -59,6 +56,7 @@ if 'current_step' not in st.session_state:
 if 'research_history' not in st.session_state:
     st.session_state.research_history = []
 
+# Helper display
 def display_status(status: str, message: str):
     color_class = {
         "running": "status-running",
@@ -67,9 +65,9 @@ def display_status(status: str, message: str):
     }.get(status, "status-box")
     st.markdown(f'<div class="status-box {color_class}">{message}</div>', unsafe_allow_html=True)
 
+# Full automated research cycle
 def run_full_research_cycle(state: Dict[str, Any]) -> Dict[str, Any]:
     try:
-        graph = st.session_state.graph
         progress_bar = st.progress(0)
         status_text = st.empty()
 
@@ -89,16 +87,17 @@ def run_full_research_cycle(state: Dict[str, Any]) -> Dict[str, Any]:
             if current_state.get("decision") == "human_feedback":
                 return current_state
 
-        status_text.text("Research Completed.")
         progress_bar.progress(1.0)
+        status_text.text("Research Completed.")
         return current_state
     except Exception as e:
         st.error(f"Error during research: {e}")
         return state
 
+# Handle human feedback actions
 def handle_human_decision(state: Dict[str, Any], decision: str, manual_input: str = "") -> Dict[str, Any]:
-    if decision == "manual" and manual_input:
-        return {**state, "summary": manual_input, "decision": "end"}
+    if decision == "manual" and manual_input.strip():
+        return {**state, "summary": manual_input.strip(), "decision": "end"}
     if decision in ["end", "reresearch", "resummarize"]:
         return {**state, "decision": decision}
     return {**state, "decision": "end"}
@@ -107,7 +106,7 @@ def handle_human_decision(state: Dict[str, Any], decision: str, manual_input: st
 with st.sidebar:
     st.header("Research Controls")
     query = st.text_input("Enter your research query:")
-    
+
     if st.button("Start Research", type="primary"):
         if query.strip():
             st.session_state.research_state = {
@@ -127,9 +126,9 @@ with st.sidebar:
             st.error("Please enter a query.")
 
     if st.button("Clear History"):
-        st.session_state.research_history = []
         st.session_state.research_state = None
         st.session_state.current_step = None
+        st.session_state.research_history = []
         st.rerun()
 
     if st.session_state.research_history:
@@ -138,20 +137,20 @@ with st.sidebar:
             with st.expander(f"Query: {entry['query']}"):
                 st.write(f"Completed: {entry['timestamp']}")
 
-# ────────────── Main Section ──────────────
+# ────────────── Main Area ──────────────
 st.markdown('<h1 class="main-header">Research Agent</h1>', unsafe_allow_html=True)
 
 state = st.session_state.research_state
 
 if state is None:
     st.markdown("""
-        ### Welcome!
-        Use the sidebar to input a query and start researching.
-        This agent will use AI to research, summarize, and refine results until satisfied.
+    ### Welcome!
+    Enter a query in the sidebar to begin. The AI will research, summarize, and improve until you're satisfied.
     """)
 else:
     st.subheader(f"Query: {state['query']}")
 
+    # Auto loop
     if st.session_state.current_step == "auto_research":
         st.markdown("### Running Research Agent...")
         updated = run_full_research_cycle(state)
@@ -168,45 +167,55 @@ else:
             })
         st.rerun()
 
+    # Human decision required
     elif st.session_state.current_step == "human_feedback":
         st.subheader("Your Input Needed")
         st.markdown("### Current Summary")
         st.markdown(state["summary"])
 
         if state.get("_critic_recommendation"):
-            st.info(f"AI recommends: **{state['_critic_recommendation']}**")
-        updated=None
+            st.info(f"AI Recommendation: **{state['_critic_recommendation']}**")
+
+        updated = None
         col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button(" Accept Summary"):
+            if st.button("✅ Accept Summary"):
                 updated = handle_human_decision(state, "end")
         with col2:
-            if st.button(" More Research"):
+            if st.button("🔄 More Research"):
                 updated = handle_human_decision(state, "reresearch")
         with col3:
-            if st.button(" Resummarize"):
+            if st.button("📝 Resummarize"):
                 updated = handle_human_decision(state, "resummarize")
-                
 
-        manual_input = st.text_area("Or write your own summary:", height=200)
-        if st.button("Submit Manual Summary"):
-            updated = handle_human_decision(state, "manual", manual_input)
+        manual_input = st.text_area("✍️ Or write your own summary:", height=200)
+        if st.button("📤 Submit Manual Summary"):
+            if manual_input.strip():
+                updated = handle_human_decision(state, "manual", manual_input)
+            else:
+                st.warning("Please enter a summary.")
 
         if updated:
             st.session_state.research_state = updated
-            st.session_state.current_step = None
-            st.session_state.research_history.append({
-                "query": updated["query"],
-                "summary": updated["summary"],
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")
-            })
+            decision = updated.get("decision")
+            if decision in ["reresearch", "resummarize"]:
+                st.session_state.current_step = "auto_research"
+            else:
+                st.session_state.current_step = None
+                st.session_state.research_history.append({
+                    "query": updated["query"],
+                    "summary": updated["summary"],
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")
+                })
             st.rerun()
+
+    # Final state
     else:
-        st.success(" Research Completed")
+        st.success("✅ Research Completed")
         st.markdown("### Final Summary")
         st.markdown(state["summary"])
 
-        with st.expander("View Raw Research Data"):
+        with st.expander("View Raw Research Content"):
             st.text(state["raw_content"][:2000])
 
         col1, col2 = st.columns(2)
