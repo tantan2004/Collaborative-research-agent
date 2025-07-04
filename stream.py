@@ -2,14 +2,12 @@ import streamlit as st
 from datetime import datetime
 from typing import Dict, Any
 
-# Import backend logic
 try:
     from run import build_graph, GraphState, run_node
 except ImportError:
     st.error("Could not import required functions from run.py.")
     st.stop()
 
-# Page config and CSS
 st.set_page_config(page_title="Research Agent", page_icon="🔍", layout="wide")
 
 st.markdown("""
@@ -41,7 +39,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Initialize session state
 if 'graph' not in st.session_state:
     try:
         st.session_state.graph = build_graph()
@@ -65,36 +62,47 @@ def display_status(status: str, message: str):
     }.get(status, "status-box")
     st.markdown(f'<div class="status-box {color_class}">{message}</div>', unsafe_allow_html=True)
 
-# Full automated research cycle
 def run_full_research_cycle(state: Dict[str, Any]) -> Dict[str, Any]:
     try:
         progress_bar = st.progress(0)
         status_text = st.empty()
 
         current_state = state.copy()
-        for step in range(10):
+        max_loops = 10
+
+        for step in range(max_loops):
             if current_state.get("decision") == "end":
                 break
 
-            progress_bar.progress((step + 1) / 10)
+            progress_bar.progress((step + 1) / max_loops)
 
-            for phase in ["researcher", "summarizer", "critic"]:
+            decision = current_state.get("decision", "")
+            status_text.text(f"Running: {decision or 'researcher'}")
+
+            # Only run what the critic or human recommended
+            if decision == "reresearch" or step == 0:
+                current_state = run_node("researcher", current_state)
                 if current_state.get("decision") == "end":
                     break
-                status_text.text(f"{phase.capitalize()} in progress...")
-                current_state = run_node(phase, current_state)
 
+            if decision == "resummarize" or step == 0 or current_state.get("decision") == "resummarize":
+                current_state = run_node("summarizer", current_state)
+                if current_state.get("decision") == "end":
+                    break
+
+            current_state = run_node("critic", current_state)
             if current_state.get("decision") == "human_feedback":
                 return current_state
 
         progress_bar.progress(1.0)
-        status_text.text("Research Completed.")
+        status_text.text("Research completed.")
         return current_state
+
     except Exception as e:
         st.error(f"Error during research: {e}")
         return state
 
-# Handle human feedback actions
+
 def handle_human_decision(state: Dict[str, Any], decision: str, manual_input: str = "") -> Dict[str, Any]:
     if decision == "manual" and manual_input.strip():
         return {**state, "summary": manual_input.strip(), "decision": "end"}
@@ -179,17 +187,17 @@ else:
         updated = None
         col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button("✅ Accept Summary"):
+            if st.button("Accept Summary"):
                 updated = handle_human_decision(state, "end")
         with col2:
-            if st.button("🔄 More Research"):
+            if st.button(" More Research"):
                 updated = handle_human_decision(state, "reresearch")
         with col3:
-            if st.button("📝 Resummarize"):
+            if st.button(" Resummarize"):
                 updated = handle_human_decision(state, "resummarize")
 
-        manual_input = st.text_area("✍️ Or write your own summary:", height=200)
-        if st.button("📤 Submit Manual Summary"):
+        manual_input = st.text_area(" Or write your own summary:", height=200)
+        if st.button("Submit Manual Summary"):
             if manual_input.strip():
                 updated = handle_human_decision(state, "manual", manual_input)
             else:
@@ -211,7 +219,7 @@ else:
 
     # Final state
     else:
-        st.success("✅ Research Completed")
+        st.success(" Research Completed")
         st.markdown("### Final Summary")
         st.markdown(state["summary"])
 
