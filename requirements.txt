@@ -1,0 +1,11 @@
+langchain
+transformers
+langgraph
+accelerate 
+langchainhub 
+langchain_community 
+langchain_groq
+typing
+Ipython
+tavily-python
+streamlit
