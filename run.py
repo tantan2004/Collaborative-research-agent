@@ -13,8 +13,6 @@ load_dotenv()
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-if not TAVILY_API_KEY:
-    print("WARNING: TAVILY_API_KEY not found - web search will be limited")
 if not GROQ_API_KEY:
     raise ValueError("GROQ_API_KEY not found in environment variables")
 
@@ -32,26 +30,21 @@ class GraphState(TypedDict):
     research_count: int
     summarize_count: int
     _critic_recommendation: str
+    _research_approaches: list
 
 def get_web_search_tool():
     try:
         if not TAVILY_API_KEY:
             return None
-            
         search_tool = TavilySearchResults(
             max_results=3,
             search_depth="basic",
             include_answer=True,
             include_raw_content=False,
         )
-        
-        try:
-            test_result = search_tool.run("python")
-            return search_tool
-        except Exception as e:
-            return None
-        
-    except Exception as e:
+        test_result = search_tool.run("python")
+        return search_tool
+    except:
         return None
 
 def create_llm_with_retry(model_name: str, temperature: float = 0.1, max_tokens: int = 1024, max_retries: int = 3):
@@ -65,533 +58,277 @@ def create_llm_with_retry(model_name: str, temperature: float = 0.1, max_tokens:
                 timeout=60,
                 max_retries=2
             )
-            
             test_response = llm.invoke("Say 'OK'")
             test_content = test_response.content if hasattr(test_response, 'content') else str(test_response)
-            
             if test_content and len(test_content.strip()) > 0:
                 return llm
-            else:
-                raise Exception("LLM test returned empty response")
-                
-        except Exception as e:
-            if attempt == max_retries - 1:
-                raise e
+        except:
             time.sleep(2)
-    
     return None
 
-try:
-    summarizer_model = create_llm_with_retry("llama-3.3-70b-versatile", 0.3, 2048)
-    critic_model = create_llm_with_retry("llama-3.1-8b-instant", 0.1, 512)
-    search_tool = get_web_search_tool()
-    
-except Exception as e:
-    print(f"Initialization failed: {e}")
-    raise
-
-def researcher_node():
-    def run_research(input_state: GraphState) -> GraphState:
-        try:
-            query = input_state["query"]
-            research_count = input_state.get("research_count", 0) + 1
-            
-            if research_count > 3:
-                result = f"Research attempt limit reached for query: {query}."
-            else:
-                result = None
-                
-                if search_tool:
-                    try:
-                        search_query = f"{query} basics explanation"
-                        search_results = search_tool.run(search_query)
-                        
-                        if search_results and len(str(search_results)) > 50:
-                            result = f"Web search results for '{query}':\n\n{str(search_results)[:2000]}"
-                    except Exception as e:
-                        pass
-                
-                if not result or len(result) < 100:
-                    try:
-                        research_llm = create_llm_with_retry("llama-3.3-70b-versatile", 0.2, 1500)
-                        
-                        fallback_prompt = f"""Please explain {query} in simple terms. Include:
-
-1. What it is (definition)
-2. How it works (basic principles)
-3. Why it matters (applications/importance)
-4. Current status or developments
-
-Keep the explanation clear and informative, around 300-500 words.
-
-Topic: {query}"""
-
-                        fallback_result = research_llm.invoke(fallback_prompt)
-                        fallback_content = fallback_result.content if hasattr(fallback_result, "content") else str(fallback_result)
-                        
-                        if fallback_content and len(fallback_content.strip()) > 100:
-                            result = f"Knowledge base information for '{query}':\n\n{fallback_content}"
-                        else:
-                            result = f"Limited information available for '{query}'. This may be a very specialized or emerging topic."
-                            
-                    except Exception as e:
-                        result = f"Research encountered difficulties for '{query}'. Error: {str(e)}"
-                
-                if not result or len(result) < 50:
-                    result = f"Minimal information available for '{query}'. This could indicate a very specialized topic or technical issues."
-            
-            return {
-                **input_state, 
-                "raw_content": result,
-                "research_count": research_count,
-                "decision": "",
-            }
-            
-        except Exception as e:
-            return {
-                **input_state,
-                "raw_content": f"Research error for '{input_state.get('query', 'unknown')}': {str(e)}",
-                "research_count": input_state.get("research_count", 0) + 1,
-                "decision": "end"
-            }
-    
-    return RunnableLambda(run_research)
-
-def summarizer_node():
-    def summarize(input_state: GraphState) -> GraphState:
-        try:
-            content = input_state.get("raw_content", "")
-            query = input_state.get("query", "")
-            current_summary = input_state.get("summary", "")
-            summarize_count = input_state.get("summarize_count", 0) + 1
-            
-            if summarize_count > 3:
-                final_summary = current_summary if current_summary else "Maximum summarization attempts reached."
-            else:
-                is_error_content = (
-                    content.startswith("Research error") or 
-                    content.startswith("Research encountered") or
-                    content.startswith("Minimal information") or
-                    len(content.strip()) < 100
-                )
-                
-                if is_error_content:
-                    final_summary = f"Research on '{query}' was limited. The topic may require specialized sources or more specific search terms. Available information indicates this is related to {query.lower()} but detailed coverage was not possible."
-                else:
-                    if summarize_count == 1:
-                        prompt = f"""Based on the following information about {query}, create a clear summary with 4-6 bullet points:
-
-{content[:2000]}
-
-Format your response as bullet points covering:
-• Definition/what it is
-• Key characteristics or principles
-• Applications or importance
-• Current relevance
-
-Topic: {query}
-Create a well-structured summary:"""
-
-                    else:
-                        prompt = f"""Improve this summary about {query}:
-
-Current Summary:
-{current_summary}
-
-Source Material:
-{content[:1500]}
-
-Create an enhanced summary with 4-6 clear bullet points that better explains {query}."""
-
-                    try:
-                        max_attempts = 3
-                        final_summary = None
-                        
-                        for attempt in range(max_attempts):
-                            try:
-                                response = summarizer_model.invoke(prompt)
-                                candidate_summary = response.content.strip() if hasattr(response, "content") else str(response).strip()
-                                
-                                if candidate_summary and len(candidate_summary) > 50:
-                                    final_summary = candidate_summary
-                                    break
-                                    
-                            except Exception as attempt_error:
-                                if attempt == max_attempts - 1:
-                                    raise attempt_error
-                                time.sleep(1)
-                        
-                        if not final_summary:
-                            sentences = content.replace('\n', ' ').split('. ')[:3]
-                            basic_content = '. '.join(sentences)
-                            final_summary = f"Summary of {query}: {basic_content[:400]}..."
-                        
-                        if len(final_summary) < 50:
-                            final_summary = f"Brief summary for '{query}': {final_summary}\n\nNote: Summary is limited due to source material constraints."
-                            
-                    except Exception as e:
-                        if current_summary:
-                            final_summary = current_summary
-                        else:
-                            words = content.split()[:100]
-                            emergency_summary = ' '.join(words)
-                            final_summary = f"Basic information about {query}: {emergency_summary}..."
-            
-            return {
-                **input_state,
-                "previous_summary": input_state.get("summary", ""),
-                "summary": final_summary,
-                "summarize_count": summarize_count,
-                "decision": "",
-            }
-            
-        except Exception as e:
-            return {
-                **input_state,
-                "summary": f"Summarization failed for '{input_state.get('query', 'unknown')}': Critical error occurred",
-                "summarize_count": input_state.get("summarize_count", 0) + 1,
-                "decision": "end"
-            }
-    
-    return RunnableLambda(summarize)
-
-def critic_node():
-    def evaluate(input_state: GraphState) -> GraphState:
-        try:
-            summary = input_state.get("summary", "")
-            prev_summary = input_state.get("previous_summary", "")
-            loop_count = input_state.get("loop_count", 0) + 1
-            research_count = input_state.get("research_count", 0)
-            summarize_count = input_state.get("summarize_count", 0)
-            query = input_state.get("query", "")
-            raw_content = input_state.get("raw_content", "")
-            
-            # Use LLM for intelligent decision making
-            critic_prompt = f"""You are a research quality critic. Analyze the following research summary and decide what action to take next.
-
-QUERY: {query}
-CURRENT SUMMARY:
-{summary}
-
-PREVIOUS SUMMARY: {prev_summary if prev_summary else "None"}
-
-RAW CONTENT PREVIEW: {raw_content[:300]}...
-
-STATISTICS:
-- Loop: {loop_count}
-- Research attempts: {research_count}
-- Summarize attempts: {summarize_count}
-- Summary length: {len(summary)} chars
-- Word count: {len(summary.split())} words
-
-EVALUATION CRITERIA:
-1. Does the summary adequately answer the query?
-2. Is the information comprehensive and well-structured?
-3. Are there clear bullet points or structured information?
-4. Does it cover key aspects (definition, principles, applications, importance)?
-5. Is the content detailed enough (minimum 100+ words, 4+ bullet points)?
-
-DECISION OPTIONS:
-- "end": Summary is comprehensive and high quality
-- "resummarize": Summary needs improvement, restructuring, or more detail
-- "reresearch": Content is insufficient, need more source material
-
-LIMITS: Max 4 research attempts, Max 4 summarize attempts
-
-Based on your analysis, respond with ONLY ONE WORD: end, resummarize, or reresearch"""
-
-            try:
-                critic_response = critic_model.invoke(critic_prompt)
-                llm_decision = critic_response.content.strip().lower() if hasattr(critic_response, "content") else str(critic_response).strip().lower()
-                
-                if "reresearch" in llm_decision:
-                    original_decision = "reresearch"
-                elif "resummarize" in llm_decision:
-                    original_decision = "resummarize"
-                elif "end" in llm_decision:
-                    original_decision = "end"
-                else:
-                    original_decision = "resummarize"
-                
-                if original_decision == "resummarize" and prev_summary and is_similar(summary, prev_summary):
-                    original_decision = "reresearch" if research_count < 4 else "end"
-                if loop_count < 10 and (original_decision == "reresearch" or original_decision == "resummarize"):
-                  decision = original_decision
-                else:
-                   decision = "human_feedback"
-                    
-            except Exception as e:
-                print(f"LLM critic evaluation failed: {e}")
-                failure_indicators = ["failed", "error", "insufficient", "limited"]
-                has_failure = any(indicator.lower() in summary.lower() for indicator in failure_indicators)
-                is_too_short = len(summary.strip()) < 80
-                
-                if has_failure and research_count < 4:
-                    original_decision = "reresearch"
-                elif is_too_short and summarize_count < 4:
-                    original_decision = "resummarize"
-                else:
-                    original_decision = "end"
-                    
-                decision = "human_feedback"
-            
-            return {
-                **input_state,
-                "decision": decision,
-                "loop_count": loop_count,
-                "_critic_recommendation": original_decision
-            }
-            
-        except Exception as e:
-            print(f"Critic node error: {e}")
-            return {
-                **input_state,
-                "decision": "end",
-                "loop_count": input_state.get("loop_count", 0) + 1
-            }
-    
-    return RunnableLambda(evaluate)
+summarizer_model = create_llm_with_retry("llama-3.3-70b-versatile", 0.3, 2048)
+critic_model = create_llm_with_retry("llama-3.1-8b-instant", 0.1, 512)
+search_tool = get_web_search_tool()
 
 def is_similar(a, b, threshold=0.75):
-    """Check if two strings are similar above a threshold using sequence matching."""
     if not a or not b:
         return False
-    
     ratio = SequenceMatcher(None, a.strip(), b.strip()).ratio()
     return ratio >= threshold
 
-def human_feedback_node():
-    """Node for human intervention to review and decide on next action."""
-    def get_human_feedback(input_state: GraphState) -> GraphState:
-        try:
-            summary = input_state.get("summary", "")
-            query = input_state.get("query", "")
-            research_count = input_state.get("research_count", 0)
-            summarize_count = input_state.get("summarize_count", 0)
-            loop_count = input_state.get("loop_count", 0)
-            
-            # Get the critic's original recommendation
-            critic_recommendation = input_state.get('_critic_recommendation', 'Not available')
-            
-            print("\n" + "="*50)
-            print("HUMAN REVIEW REQUIRED")
-            print("="*50)
-            print(f"\nQuery: {query}")
-            print(f"\nCurrent Summary:")
-            print("-" * 30)
-            print(summary)
-            print("-" * 30)
-            
-            print(f"\nExecution Stats:")
-            print(f"• Loops completed: {loop_count}")
-            print(f"• Research attempts: {research_count}")
-            print(f"• Summarize attempts: {summarize_count}")
-            
-            print(f"\nCritic's Recommendation: {critic_recommendation}")
-            
-            print(f"\nAvailable Actions:")
-            print("1. ACCEPT - Summary is satisfactory, end the process")
-            print("2. RESEARCH - Need more/different information")
-            print("3. SUMMARIZE - Current info is good but summary needs improvement")
-            print("4. MANUAL - Provide your own summary/improvements")
-            
-            while True:
-                try:
-                    choice = input("\nEnter your choice (1-4): ").strip()
-                    
-                    if choice == "1" or choice.lower() in ["accept", "a"]:
-                        decision = "end"
-                        print("Summary accepted. Ending process.")
-                        break
-                        
-                    elif choice == "2" or choice.lower() in ["research", "r"]:
-                        if research_count >= 4:
-                            print("Maximum research attempts reached. Try summarize or manual instead.")
-                            continue
-                        decision = "reresearch"
-                        print("Will conduct additional research.")
-                        break
-                        
-                    elif choice == "3" or choice.lower() in ["summarize", "s"]:
-                        if summarize_count >= 4:
-                            print("Maximum summarize attempts reached. Try research or manual instead.")
-                            continue
-                        decision = "resummarize"
-                        print("Will improve the summary.")
-                        break
-                        
-                    elif choice == "4" or choice.lower() in ["manual", "m"]:
-                        print("\nProvide your improvements or new summary:")
-                        print("(Press Enter twice when done)")
-                        
-                        manual_input = []
-                        empty_lines = 0
-                        while empty_lines < 2:
-                            line = input()
-                            if line.strip() == "":
-                                empty_lines += 1
-                            else:
-                                empty_lines = 0
-                            manual_input.append(line)
-                        
-                        while manual_input and manual_input[-1].strip() == "":
-                            manual_input.pop()
-                            
-                        if manual_input:
-                            manual_summary = "\n".join(manual_input)
-                            decision = "end"
-                            print("Manual input accepted.")
-                            
-                            return {
-                                **input_state,
-                                "summary": manual_summary,
-                                "decision": decision,
-                                "loop_count": loop_count + 1
-                            }
-                        else:
-                            print("No input provided. Please choose again.")
-                            continue
-                            
-                    else:
-                        print("Invalid choice. Please enter 1, 2, 3, or 4.")
-                        continue
-                        
-                except KeyboardInterrupt:
-                    print("\nOperation cancelled by user.")
-                    decision = "end"
-                    break
-                except Exception as e:
-                    print(f"Input error: {e}. Please try again.")
-                    continue
-            
+def researcher_node():
+    def run_research(state: GraphState) -> GraphState:
+        query = state["query"]
+        research_count = state.get("research_count", 0) + 1
+        approaches = state.get("_research_approaches", [])
+        result = None
+        strategies = [
+            f"{query} overview explanation",
+            f"{query} technical details and examples",
+            f"{query} applications and case studies",
+            f"{query} current trends and future prospects",
+            f"{query} challenges and innovations"
+        ]
+        available = [s for s in strategies if s not in approaches] or strategies
+        search_query = available[min(research_count - 1, len(available) - 1)]
+        approaches.append(search_query)
+        if search_tool:
+            try:
+                search_results = search_tool.run(search_query)
+                if search_results and len(str(search_results)) > 50:
+                    result = f"Web search results for '{query}':\n\n{str(search_results)[:2000]}"
+            except:
+                pass
+        if not result or len(result) < 100:
+            try:
+                temp_variation = 0.2 + (research_count * 0.1)
+                research_llm = create_llm_with_retry("llama-3.3-70b-versatile", temp_variation, 1500)
+                prompt = f"""
+You are a domain expert tasked with explaining the concept of "{query}" in a structured and insightful manner.
+
+Focus areas:
+- Clear and concise definition
+- Fundamental principles or working mechanisms
+- Real-world use cases and applications
+- Industry relevance and current developments
+- Future outlook or emerging trends
+
+Avoid repeating previous attempts: {approaches}
+
+Create a comprehensive, readable explanation (300–500 words).
+"""
+                response = research_llm.invoke(prompt)
+                result = response.content if hasattr(response, "content") else str(response)
+            except:
+                result = f"Minimal information for '{query}'."
+        return {
+            **state,
+            "raw_content": result,
+            "research_count": research_count,
+            "_research_approaches": approaches,
+            "decision": "",
+        }
+    return RunnableLambda(run_research)
+
+def summarizer_node():
+    def summarize(state: GraphState) -> GraphState:
+        content = state.get("raw_content", "")
+        query = state.get("query", "")
+        current_summary = state.get("summary", "")
+        summarize_count = state.get("summarize_count", 0) + 1
+        is_error_content = (
+            content.startswith("Research error") or 
+            content.startswith("Minimal information") or
+            len(content.strip()) < 100
+        )
+        if summarize_count > 4:
             return {
-                **input_state,
-                "decision": decision,
-                "loop_count": loop_count + 1
-            }
-            
-        except Exception as e:
-            print(f"Human feedback error: {e}")
-            return {
-                **input_state,
+                **state,
+                "previous_summary": state.get("summary", ""),
+                "summary": current_summary or "Maximum summarization attempts reached.",
+                "summarize_count": summarize_count,
                 "decision": "end",
-                "loop_count": input_state.get("loop_count", 0) + 1
             }
-    
-    return RunnableLambda(get_human_feedback)
+        if is_error_content:
+            final_summary = f"Research on '{query}' was limited."
+        else:
+            temp_variation = 0.3 + (summarize_count * 0.1)
+            summarizer = create_llm_with_retry("llama-3.3-70b-versatile", temp_variation, 2048)
+            prompt = f"""
+Summarize the following content related to "{query}" in an organized manner:
+
+Include:
+- Definition
+- Key principles or mechanism
+- Applications or case studies
+- Importance or relevance
+- Any trends, challenges, or future scope
+
+Source:
+{content[:2000]}
+"""
+            try:
+                response = summarizer.invoke(prompt)
+                final_summary = response.content.strip() if hasattr(response, "content") else str(response).strip()
+            except:
+                final_summary = "Summary generation failed."
+        return {
+            **state,
+            "previous_summary": state.get("summary", ""),
+            "summary": final_summary,
+            "summarize_count": summarize_count,
+            "decision": "",
+        }
+    return RunnableLambda(summarize)
+
+def critic_node():
+    def evaluate(state: GraphState) -> GraphState:
+        summary = state.get("summary", "")
+        prev = state.get("previous_summary", "")
+        loop_count = state.get("loop_count", 0) + 1
+        research_count = state.get("research_count", 0)
+        summarize_count = state.get("summarize_count", 0)
+        query = state.get("query", "")
+
+        try:
+            prompt = f"""
+You are a research quality evaluator in a multi-agent system.
+
+Evaluate the current summary based on the following:
+
+- Does it fully answer the user's research query: "{query}"?
+- Does it cover key components: definition, principles, examples, applications, importance?
+- Is it better than or significantly different from the previous summary?
+- Is it detailed, well-structured, and non-redundant?
+
+Previous summary (if any):
+{prev or 'None'}
+
+Current summary:
+{summary}
+
+Progress:
+- Loop Count: {loop_count}
+- Research Attempts: {research_count}/4
+- Summarize Attempts: {summarize_count}/4
+
+Decision rules:
+- Respond with **reresearch** if more or better information is needed.
+- Respond with **resummarize** if the content is enough but summary can be improved.
+- Respond with **end** if the summary is complete and well-structured.
+
+Reply ONLY with one word: reresearch, resummarize, or end.
+"""
+            response = critic_model.invoke(prompt)
+            llm_decision = response.content.strip().lower()
+
+            if "reresearch" in llm_decision:
+                decision = "reresearch"
+            elif "resummarize" in llm_decision:
+                decision = "resummarize"
+            elif "end" in llm_decision:
+                decision = "end"
+            else:
+                decision = "resummarize"
+
+            if decision == "resummarize" and prev and is_similar(summary, prev):
+                decision = "reresearch" if research_count < 4 else "end"
+
+            if decision == "reresearch" and research_count >= 3 and is_similar(summary, prev):
+                decision = "human_feedback"
+
+            if decision == "end" and prev and is_similar(summary, prev) and loop_count >= 2:
+                decision = "human_feedback"
+
+            if loop_count >= 6 or (research_count >= 4 and summarize_count >= 4):
+                decision = "human_feedback"
+
+            if decision in ["end", "resummarize", "reresearch"]:
+                decision = "human_feedback"
+
+        except:
+            decision = "human_feedback"
+
+        print(f"[Critic Evaluation] Loop: {loop_count} | Research: {research_count}/4 | Summarize: {summarize_count}/4 | Decision: {decision}")
+
+        return {
+            **state,
+            "decision": decision,
+            "loop_count": loop_count,
+            "_critic_recommendation": decision
+        }
+
+    return RunnableLambda(evaluate)
+
+def human_feedback_node():
+    def get_feedback(state: GraphState) -> GraphState:
+        summary = state.get("summary", "")
+        query = state.get("query", "")
+        print(f"\nQuery: {query}\nSummary: {summary}")
+        print("1. Accept\n2. Research\n3. Summarize\n4. Manual Input")
+        choice = input("Choose (1-4): ").strip()
+        if choice == "1":
+            return {**state, "decision": "end", "loop_count": state.get("loop_count", 0) + 1}
+        elif choice == "2":
+            return {**state, "decision": "reresearch", "loop_count": state.get("loop_count", 0) + 1}
+        elif choice == "3":
+            return {**state, "decision": "resummarize", "loop_count": state.get("loop_count", 0) + 1}
+        elif choice == "4":
+            print("Enter manual summary (end with two empty lines):")
+            lines, empty = [], 0
+            while empty < 2:
+                line = input()
+                if not line.strip(): empty += 1
+                else: empty = 0
+                lines.append(line)
+            summary = "\n".join([l for l in lines if l.strip()])
+            return {**state, "summary": summary, "decision": "end", "loop_count": state.get("loop_count", 0) + 1}
+        return {**state, "decision": "end", "loop_count": state.get("loop_count", 0) + 1}
+    return RunnableLambda(get_feedback)
 
 def route_decision(state: GraphState) -> str:
-    decision = state.get("decision", "end")
-    loop_count = state.get("loop_count", 0)
-    research_count = state.get("research_count", 0)
-    summarize_count = state.get("summarize_count", 0)
-    
-    if loop_count >= 10:
-        return END
-    
-    if research_count >= 4 and summarize_count >= 4:
-        return END
-    
-    if decision == "end":
-        return END
-    elif decision == "reresearch" and research_count < 4:
+    d = state.get("decision", "end")
+    if d == "reresearch" and state.get("research_count", 0) < 4:
         return "researcher"
-    elif decision == "resummarize" and summarize_count < 4:
+    elif d == "resummarize" and state.get("summarize_count", 0) < 4:
         return "summarizer"
-    elif decision == "human_feedback":
+    elif d == "human_feedback":
         return "human_feedback"
-    else:
-        return END
-def run_node(step: str, state: GraphState) -> GraphState:
-    node_map = {
-        "researcher": researcher_node,
-        "summarizer": summarizer_node,
-        "critic": critic_node,
-        "human_feedback": human_feedback_node
-    }
-
-    if step in node_map:
-        return node_map[step]().invoke(state)
-    else:
-        raise ValueError(f"Unknown step: {step}")
-
+    return END
 
 def build_graph():
-    try:
-        builder = StateGraph(GraphState)
-
-        builder.add_node("researcher", researcher_node())
-        builder.add_node("summarizer", summarizer_node())
-        builder.add_node("critic", critic_node())
-        builder.add_node("human_feedback", human_feedback_node())
-
-        builder.add_edge(START, "researcher")
-        builder.add_edge("researcher", "summarizer")
-        builder.add_edge("summarizer", "critic")
-        builder.add_conditional_edges("critic", route_decision)
-        builder.add_conditional_edges("human_feedback", route_decision)
-
-        graph = builder.compile()
-        return graph
-        
-    except Exception as e:
-        print(f"Graph building error: {e}")
-        raise
+    builder = StateGraph(GraphState)
+    builder.add_node("researcher", researcher_node())
+    builder.add_node("summarizer", summarizer_node())
+    builder.add_node("critic", critic_node())
+    builder.add_node("human_feedback", human_feedback_node())
+    builder.add_edge(START, "researcher")
+    builder.add_edge("researcher", "summarizer")
+    builder.add_edge("summarizer", "critic")
+    builder.add_conditional_edges("critic", route_decision)
+    builder.add_conditional_edges("human_feedback", route_decision)
+    return builder.compile()
 
 def main():
-    try:
-        print("RESEARCH AGENT")
-        print("="*40)
-        
-        graph = build_graph()
-        
-        query = input("Enter your research query: ").strip()
-        if not query:
-            print("No query provided. Exiting.")
-            return
-        
-        initial_state = {
-            "query": query,
-            "raw_content": "",
-            "summary": "",
-            "previous_summary": "",
-            "decision": "",
-            "loop_count": 0,
-            "research_count": 0,
-            "summarize_count": 0,
-            "_critic_recommendation": ""
-        }
-        
-        print(f"\nResearching: '{query}'")
-        print("="*40)
-        
-        try:
-            final_state = graph.invoke(initial_state, config={"recursion_limit": 25})
-                
-        except Exception as e:
-            print(f"\nExecution error: {e}")
-            return
-        
-        print("\nRESEARCH COMPLETE")
-        print("="*40)
-        
-        print(f"\nQuery: {final_state.get('query', 'N/A')}")
-        
-        print(f"\nSummary:")
-        print("-" * 30)
-        summary = final_state.get('summary', 'No summary available')
-        print(summary)
-        
-        print(f"\nStats:")
-        print(f"Loops: {final_state.get('loop_count', 0)}")
-        print(f"Research: {final_state.get('research_count', 0)}")
-        print(f"Summarize: {final_state.get('summarize_count', 0)}")
-        print(f"Decision: {final_state.get('decision', 'N/A')}")
-        
-    except KeyboardInterrupt:
-        print("\nInterrupted by user.")
-    except Exception as e:
-        print(f"\nError: {e}")
+    graph = build_graph()
+    query = input("Enter your research query: ").strip()
+    if not query:
+        return
+    initial_state = {
+        "query": query,
+        "raw_content": "",
+        "summary": "",
+        "previous_summary": "",
+        "decision": "",
+        "loop_count": 0,
+        "research_count": 0,
+        "summarize_count": 0,
+        "_critic_recommendation": "",
+        "_research_approaches": []
+    }
+    final_state = graph.invoke(initial_state, config={"recursion_limit": 30})
+    print(f"\nFinal Summary:\n{final_state.get('summary', 'No summary')}")
+    print(f"\nTotal Loops: {final_state.get('loop_count', 0)}")
 
 if __name__ == "__main__":
     main()
